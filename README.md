@@ -22,7 +22,7 @@ source venv/bin/activate  # Linux/Mac
 # или
 venv\Scripts\activate  # Windows
 
-pip install -r requirements.txt
+pip install -r requirements_simple.txt
 ```
 
 ### 2. Настройка переменных окружения
@@ -38,20 +38,20 @@ DATABASE_PATH=metrics.db
 ### 3. Запуск бота
 
 ```bash
-python main.py
+python main_simple_stable.py
 ```
 
 ## Структура проекта
 
 ```
 assertive-me-bot/
-├── main.py              # Основной файл запуска
+├── main_simple_stable.py              # Основной файл запуска
 ├── config.py            # Конфигурация и настройки
 ├── database.py          # Работа с SQLite базой данных
 ├── llm_service.py       # Интеграция с OpenAI API
 ├── message_handler.py   # Обработка сообщений Telegram
 ├── validators.py        # Валидация входящих сообщений
-├── requirements.txt     # Зависимости Python
+├── requirements_simple.txt     # Зависимости Python
 ├── .env                 # Переменные окружения
 └── README.md           # Документация
 ```
