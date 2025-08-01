@@ -69,6 +69,28 @@ class SimpleTelegramBot:
             logger.error(f"Ошибка редактирования сообщения: {e}")
             return None
     
+    def edit_message_text_with_markup(self, chat_id, message_id, text, reply_markup=None, parse_mode='Markdown'):
+        """Редактирование сообщения с клавиатурой"""
+        url = f"{self.api_url}/editMessageText"
+        data = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': text
+        }
+        
+        if reply_markup:
+            data['reply_markup'] = json.dumps(reply_markup)
+        
+        if parse_mode:
+            data['parse_mode'] = parse_mode
+        
+        try:
+            response = requests.post(url, data=data)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Ошибка редактирования сообщения с markup: {e}")
+            return None
+    
     def delete_message(self, chat_id, message_id):
         """Удаление сообщения"""
         url = f"{self.api_url}/deleteMessage"
@@ -94,6 +116,44 @@ class SimpleTelegramBot:
             return response.json()
         except Exception as e:
             logger.error(f"Ошибка ответа на callback: {e}")
+            return None
+    
+    def send_invoice(self, chat_id, title, description, payload, provider_token, currency, prices):
+        """Отправка счёта для оплаты"""
+        url = f"{self.api_url}/sendInvoice"
+        data = {
+            'chat_id': chat_id,
+            'title': title,
+            'description': description,
+            'payload': payload,
+            'provider_token': provider_token,
+            'currency': currency,
+            'prices': json.dumps(prices)
+        }
+        
+        try:
+            response = requests.post(url, data=data)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Ошибка отправки счёта: {e}")
+            return None
+    
+    def answer_pre_checkout_query(self, pre_checkout_query_id, ok=True, error_message=None):
+        """Ответ на предварительную проверку платежа"""
+        url = f"{self.api_url}/answerPreCheckoutQuery"
+        data = {
+            'pre_checkout_query_id': pre_checkout_query_id,
+            'ok': ok
+        }
+        
+        if error_message:
+            data['error_message'] = error_message
+        
+        try:
+            response = requests.post(url, data=data)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Ошибка ответа на pre-checkout: {e}")
             return None
     
     def get_updates(self, offset=None, timeout=30):
@@ -196,6 +256,7 @@ class SimpleTelegramBot:
             keyboard.append([{"text": f"Выбрать {i+1}", "callback_data": f"select_{i+1}"}])
         
         keyboard.append([{"text": "Ни один не подошел", "callback_data": "select_none"}])
+        keyboard.append([{"text": "⭐ Поддержать проект", "callback_data": "donate"}])
         
         return {"inline_keyboard": keyboard}
     
@@ -246,7 +307,11 @@ class SimpleTelegramBot:
                 source_chat_title=source_chat_title
             )
             
-            self.user_requests[user_id] = request_id
+            # Сохраняем request_id И варианты для обратной связи
+            self.user_requests[user_id] = {
+                'request_id': request_id,
+                'variants': variants
+            }
         except Exception as e:
             logger.error(f"Ошибка сохранения в БД: {e}")
         
@@ -262,6 +327,8 @@ class SimpleTelegramBot:
     
     def handle_callback_query(self, callback_query):
         """Обработка callback query"""
+        import urllib.parse
+        
         query_id = callback_query['id']
         user_id = callback_query['from']['id']
         chat_id = callback_query['message']['chat']['id']
@@ -271,11 +338,20 @@ class SimpleTelegramBot:
         # Подтверждаем callback
         self.answer_callback_query(query_id)
         
-        # Получаем ID запроса
-        request_id = self.user_requests.get(user_id)
-        if not request_id:
+        # Получаем информацию о запросе
+        user_request = self.user_requests.get(user_id)
+        if not user_request:
             self.edit_message_text(chat_id, message_id, "Ошибка: запрос не найден.")
             return
+        
+        # Извлекаем request_id и variants
+        if isinstance(user_request, dict):
+            request_id = user_request['request_id']
+            variants = user_request.get('variants', [])
+        else:
+            # Обратная совместимость со старой схемой
+            request_id = user_request
+            variants = []
         
         original_text = callback_query['message']['text']
         
@@ -295,12 +371,149 @@ class SimpleTelegramBot:
                 except Exception as e:
                     logger.error(f"Ошибка сохранения feedback: {e}")
                 
-                new_text = original_text + f"\n\n✅ Вы выбрали вариант {variant_index}. " + MESSAGES['feedback_thanks']
-                self.edit_message_text(chat_id, message_id, new_text)
+                # Получаем выбранный вариант
+                selected_variant = ""
+                if variants and len(variants) >= variant_index:
+                    selected_variant = variants[variant_index - 1]
+                
+                if selected_variant:
+                    # Отправляем новое сообщение с кнопками действий
+                    self._send_selected_variant_actions(
+                        chat_id, message_id, selected_variant, variant_index, original_text
+                    )
+                else:
+                    # Обычное сообщение без кнопок
+                    new_text = original_text + f"\n\n✅ Вы выбрали вариант {variant_index}. " + MESSAGES['feedback_thanks']
+                    self.edit_message_text(chat_id, message_id, new_text)
                 
                 # Удаляем связь
                 if user_id in self.user_requests:
                     del self.user_requests[user_id]
+        
+        elif callback_data == "donate":
+            # Пользователь нажал "Поддержать проект"
+            self.send_donation_options(chat_id, message_id)
+        
+        elif callback_data.startswith("donate_"):
+            # Пользователь выбрал сумму доната
+            stars_amount = int(callback_data.split("_")[1])
+            logger.info(f"💰 Пользователь {user_id} выбрал донат {stars_amount} звёзд")
+            
+            # Создаём счёт для оплаты
+            invoice_result = self.create_donation_invoice(chat_id, stars_amount)
+            
+            if not invoice_result or not invoice_result.get('ok'):
+                # Ошибка создания счёта
+                error_text = "❗ Ошибка при создании счёта. Попробуйте позже."
+                self.edit_message_text(chat_id, message_id, error_text)
+    
+    def _send_selected_variant_actions(self, chat_id, message_id, selected_variant, variant_index, original_text):
+        """Отправка кнопок для действий с выбранным вариантом"""
+        import urllib.parse
+        
+        # URL-энкодинг текста для Telegram URL
+        encoded_text = urllib.parse.quote(selected_variant)
+        
+        # Сообщение о выборе
+        response_text = (
+            original_text + 
+            f"\n\n✅ Вы выбрали вариант {variant_index}!\n\n"
+            f"💬 **Ваш выбранный текст:**\n_{selected_variant}_\n\n"
+            "Отличный выбор! Текст готов к отправке. Не забудьте поделиться ботом с друзьями!"
+        )
+        
+        # Создаем клавиатуру с кнопками действий
+        keyboard = {
+            "inline_keyboard": [
+                [{
+                    "text": "✉️ Переслать в любой чат",
+                    "url": f"tg://msg?text={encoded_text}"
+                }],
+                [{
+                    "text": "🤖 Поделиться ботом",
+                    "url": "https://t.me/share/url?url=https://t.me/assertive_me_bot&text=Помогает%20переформулировать%20токсичные%20сообщения%20в%20ассертивные"
+                }],
+                [{
+                    "text": "⭐ Поддержать проект",
+                    "callback_data": "donate"
+                }]
+            ]
+        }
+        
+        # Обновляем сообщение с новыми кнопками
+        self.edit_message_text_with_markup(chat_id, message_id, response_text, keyboard)
+    
+    def send_donation_options(self, chat_id, message_id=None):
+        """Отправка вариантов доната"""
+        donation_text = (
+            "⭐ **Поддержите проект Assertive.Me!**\n\n"
+            "🙏 Ваша поддержка помогает нам развивать сервис и делать общение в интернете более конструктивным.\n\n"
+            "Выберите сумму для поддержки:"
+        )
+        
+        keyboard = {
+            "inline_keyboard": [
+                [{
+                    "text": "1 ⭐ Звезда",
+                    "callback_data": "donate_1"
+                }],
+                [{
+                    "text": "5 ⭐ Звёзд",
+                    "callback_data": "donate_5"
+                }]
+            ]
+        }
+        
+        if message_id:
+            # Редактируем существующее сообщение
+            self.edit_message_text_with_markup(chat_id, message_id, donation_text, keyboard)
+        else:
+            # Отправляем новое сообщение
+            self.send_message(chat_id, donation_text, reply_markup=keyboard, parse_mode='Markdown')
+    
+    def create_donation_invoice(self, chat_id, stars_amount):
+        """Создание счёта для доната звёздами"""
+        title = f"Поддержка Assertive.Me"
+        description = f"Спасибо за поддержку нашего проекта! Ваш донат {stars_amount} звёзд помогает развивать бота."
+        payload = f"donate_{stars_amount}_stars"
+        
+        # Для Telegram Stars используем пустой provider_token
+        provider_token = ""
+        currency = "XTR"  # Telegram Stars
+        
+        prices = [{
+            "label": f"{stars_amount} звёзд",
+            "amount": stars_amount
+        }]
+        
+        return self.send_invoice(
+            chat_id=chat_id,
+            title=title,
+            description=description,
+            payload=payload,
+            provider_token=provider_token,
+            currency=currency,
+            prices=prices
+        )
+    
+    def handle_successful_payment(self, message):
+        """Обработка успешного платежа"""
+        chat_id = message['chat']['id']
+        payment = message['successful_payment']
+        stars_amount = payment['total_amount']
+        
+        thanks_message = (
+            f"🎉 **Большое спасибо за вашу поддержку!**\n\n"
+            f"⭐ Вы поддержали проект на {stars_amount} звёзд!\n\n"
+            "🚀 Ваши звёзды помогают Assertive.Me становиться лучше и делать общение в интернете более конструктивным!\n\n"
+            "🌱 Продолжайте использовать бота и делиться им с друзьями!"
+        )
+        
+        self.send_message(chat_id, thanks_message, parse_mode='Markdown')
+        
+        # Логируем успешный донат
+        user_id = message['from']['id']
+        logger.info(f"⭐ Успешный донат от {user_id}: {stars_amount} звёзд")
     
     def handle_update(self, update):
         """Обработка одного обновления"""
@@ -314,6 +527,16 @@ class SimpleTelegramBot:
                 # Команда /start
                 if message.get('text') == '/start':
                     self.send_message(chat_id, MESSAGES['welcome'], parse_mode='Markdown')
+                    return
+                
+                # Команда /donate
+                if message.get('text') == '/donate':
+                    self.send_donation_options(chat_id)
+                    return
+                
+                # Обработка успешного платежа
+                if 'successful_payment' in message:
+                    self.handle_successful_payment(message)
                     return
                 
                 # Текстовые сообщения
@@ -346,6 +569,16 @@ class SimpleTelegramBot:
             
             elif 'callback_query' in update:
                 self.handle_callback_query(update['callback_query'])
+            
+            elif 'pre_checkout_query' in update:
+                # Предварительная проверка платежа
+                pre_checkout_query = update['pre_checkout_query']
+                query_id = pre_checkout_query['id']
+                
+                # Подтверждаем платёж (всегда OK для донатов)
+                self.answer_pre_checkout_query(query_id, ok=True)
+                
+                logger.info(f"✅ Подтвержден платёж от {pre_checkout_query['from']['id']}")
                 
         except Exception as e:
             logger.error(f"Ошибка обработки обновления: {e}")

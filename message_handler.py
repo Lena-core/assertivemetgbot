@@ -3,6 +3,7 @@ from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
 import asyncio
 import logging
+import urllib.parse
 
 from config import MESSAGES
 from validators import validator
@@ -114,8 +115,11 @@ class MessageHandler:
                 source_chat_title=source_chat_title
             )
             
-            # Сохраняем связь пользователя с запросом для обратной связи
-            self.user_requests[user_id] = request_id
+            # Сохраняем связь пользователя с запросом и вариантами для обратной связи
+            self.user_requests[user_id] = {
+                'request_id': request_id,
+                'variants': variants
+            }
             
             # Удаляем сообщение "обрабатывается"
             try:
@@ -193,12 +197,14 @@ class MessageHandler:
         
         await query.answer()  # Подтверждаем получение callback
         
-        # Получаем ID запроса пользователя
-        request_id = self.user_requests.get(user_id)
-        if not request_id:
+        # Получаем данные запроса пользователя
+        user_request = self.user_requests.get(user_id)
+        if not user_request:
             await query.edit_message_text("Ошибка: запрос не найден.")
             return
         
+        request_id = user_request['request_id']
+        variants = user_request['variants']
         callback_data = query.data
         
         if callback_data.startswith("select_"):
@@ -212,17 +218,60 @@ class MessageHandler:
             else:
                 # Пользователь выбрал один из вариантов
                 variant_index = int(callback_data.split("_")[1])
+                selected_variant = variants[variant_index - 1]  # индексы с 0
                 
                 # Сохраняем выбор в базу данных
                 db_manager.save_feedback(request_id, selected_variant_index=variant_index)
                 
-                await query.edit_message_text(
-                    query.message.text + f"\n\n✅ Вы выбрали вариант {variant_index}. " + MESSAGES['feedback_thanks']
-                )
+                # Создаем кнопки для действий с выбранным текстом
+                await self._send_selected_variant_actions(query, selected_variant, variant_index)
                 
                 # Удаляем связь
                 if user_id in self.user_requests:
                     del self.user_requests[user_id]
+    
+    async def _send_selected_variant_actions(self, query, selected_variant: str, variant_index: int):
+        """Отправка кнопок для действий с выбранным вариантом"""
+        # URL-энкодинг текста для Telegram URL
+        encoded_text = urllib.parse.quote(selected_variant)
+        
+        # Сообщение о выборе
+        response_text = (
+            query.message.text + 
+            f"\n\n✅ Вы выбрали вариант {variant_index}!\n\n"
+            f"💬 **Ваш выбранный текст:**\n_{selected_variant}_\n\n"
+            "Отличный выбор! Текст готов к отправке. Не забудьте поделиться ботом с друзьями!"
+        )
+        
+        # Создаем кнопки
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📝 Копировать текст", 
+                    url=f"tg://msg?text={encoded_text}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✉️ Переслать в любой чат", 
+                    url=f"tg://msg?text={encoded_text}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🤖 Поделиться ботом", 
+                    url="https://t.me/share/url?url=https://t.me/assertive_me_bot&text=Помогает%20переформулировать%20токсичные%20сообщения%20в%20ассертивные"
+                )
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            response_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
     
     async def handle_feedback_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик причины отказа от всех вариантов"""
