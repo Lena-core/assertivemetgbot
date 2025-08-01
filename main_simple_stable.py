@@ -256,7 +256,7 @@ class SimpleTelegramBot:
             keyboard.append([{"text": f"Выбрать {i+1}", "callback_data": f"select_{i+1}"}])
         
         keyboard.append([{"text": "Ни один не подошел", "callback_data": "select_none"}])
-        keyboard.append([{"text": "⭐ Поддержать проект", "callback_data": "donate"}])
+        # Кнопка доната УБРАНА из основного меню по запросу
         
         return {"inline_keyboard": keyboard}
     
@@ -338,24 +338,44 @@ class SimpleTelegramBot:
         # Подтверждаем callback
         self.answer_callback_query(query_id)
         
-        # Получаем информацию о запросе
-        user_request = self.user_requests.get(user_id)
-        if not user_request:
-            self.edit_message_text(chat_id, message_id, "Ошибка: запрос не найден.")
+        # Обработка донатов (независимо от активного запроса)
+        if callback_data == "donate":
+            # Пользователь нажал "Поддержать проект"
+            self.send_donation_options(chat_id, message_id)
             return
         
-        # Извлекаем request_id и variants
-        if isinstance(user_request, dict):
-            request_id = user_request['request_id']
-            variants = user_request.get('variants', [])
-        else:
-            # Обратная совместимость со старой схемой
-            request_id = user_request
-            variants = []
+        if callback_data.startswith("donate_"):
+            # Пользователь выбрал сумму доната
+            stars_amount = int(callback_data.split("_")[1])
+            logger.info(f"💰 Пользователь {user_id} выбрал донат {stars_amount} звёзд")
+            
+            # Создаём счёт для оплаты
+            invoice_result = self.create_donation_invoice(chat_id, stars_amount)
+            
+            if not invoice_result or not invoice_result.get('ok'):
+                # Ошибка создания счёта
+                error_text = "❗ Ошибка при создании счёта. Попробуйте позже."
+                self.edit_message_text(chat_id, message_id, error_text)
+            return
+        
+        # Обработка выбора вариантов (требует активного запроса)
+        user_request = self.user_requests.get(user_id)
+        if not user_request and callback_data.startswith("select_"):
+            self.edit_message_text(chat_id, message_id, "Ошибка: запрос не найден.")
+            return
         
         original_text = callback_query['message']['text']
         
         if callback_data.startswith("select_"):
+            # Извлекаем request_id и variants
+            if isinstance(user_request, dict):
+                request_id = user_request['request_id']
+                variants = user_request.get('variants', [])
+            else:
+                # Обратная совместимость со старой схемой
+                request_id = user_request
+                variants = []
+            
             if callback_data == "select_none":
                 # Пользователь выбрал "Ни один не подошел"
                 new_text = original_text + "\n\n" + MESSAGES['feedback_request']
@@ -386,26 +406,9 @@ class SimpleTelegramBot:
                     new_text = original_text + f"\n\n✅ Вы выбрали вариант {variant_index}. " + MESSAGES['feedback_thanks']
                     self.edit_message_text(chat_id, message_id, new_text)
                 
-                # Удаляем связь
-                if user_id in self.user_requests:
-                    del self.user_requests[user_id]
-        
-        elif callback_data == "donate":
-            # Пользователь нажал "Поддержать проект"
-            self.send_donation_options(chat_id, message_id)
-        
-        elif callback_data.startswith("donate_"):
-            # Пользователь выбрал сумму доната
-            stars_amount = int(callback_data.split("_")[1])
-            logger.info(f"💰 Пользователь {user_id} выбрал донат {stars_amount} звёзд")
-            
-            # Создаём счёт для оплаты
-            invoice_result = self.create_donation_invoice(chat_id, stars_amount)
-            
-            if not invoice_result or not invoice_result.get('ok'):
-                # Ошибка создания счёта
-                error_text = "❗ Ошибка при создании счёта. Попробуйте позже."
-                self.edit_message_text(chat_id, message_id, error_text)
+                # НЕ удаляем связь сразу - пользователь может ещё нажать на донат
+                # if user_id in self.user_requests:
+                #     del self.user_requests[user_id]
     
     def _send_selected_variant_actions(self, chat_id, message_id, selected_variant, variant_index, original_text):
         """Отправка кнопок для действий с выбранным вариантом"""
@@ -501,6 +504,7 @@ class SimpleTelegramBot:
         chat_id = message['chat']['id']
         payment = message['successful_payment']
         stars_amount = payment['total_amount']
+        user_id = message['from']['id']
         
         thanks_message = (
             f"🎉 **Большое спасибо за вашу поддержку!**\n\n"
@@ -512,8 +516,12 @@ class SimpleTelegramBot:
         self.send_message(chat_id, thanks_message, parse_mode='Markdown')
         
         # Логируем успешный донат
-        user_id = message['from']['id']
         logger.info(f"⭐ Успешный донат от {user_id}: {stars_amount} звёзд")
+        
+        # Очищаем user_request после успешного доната
+        if user_id in self.user_requests:
+            del self.user_requests[user_id]
+            logger.info(f"🧹 Очищен user_request для {user_id} после доната")
     
     def handle_update(self, update):
         """Обработка одного обновления"""
