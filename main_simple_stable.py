@@ -31,6 +31,7 @@ class SimpleTelegramBot:
         self.last_update_id = 0
         self.user_requests = {}
         self.processing_messages = {}
+        self.waiting_for_feedback = {}  # Пользователи, ожидающие ввода причины недовольства
     
     def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         """Отправка сообщения"""
@@ -378,9 +379,19 @@ class SimpleTelegramBot:
             
             if callback_data == "select_none":
                 # Пользователь выбрал "Ни один не подошел"
+                # Устанавливаем флаг ожидания причины недовольства
+                self.waiting_for_feedback[user_id] = {
+                    'request_id': request_id,
+                    'original_message_id': message_id,
+                    'chat_id': chat_id
+                }
+                
                 new_text = original_text + "\n\n" + MESSAGES['feedback_request']
                 self.edit_message_text(chat_id, message_id, new_text)
-                # Здесь можно добавить логику ожидания причины
+                
+                # Очищаем основной запрос, так как пользователь его отклонил
+                if user_id in self.user_requests:
+                    del self.user_requests[user_id]
             else:
                 # Пользователь выбрал один из вариантов
                 variant_index = int(callback_data.split("_")[1])
@@ -499,6 +510,41 @@ class SimpleTelegramBot:
             prices=prices
         )
     
+    def handle_feedback_reason(self, user_id, reason_text):
+        """Обработка причины недовольства пользователя"""
+        if user_id not in self.waiting_for_feedback:
+            return
+            
+        feedback_info = self.waiting_for_feedback[user_id]
+        request_id = feedback_info['request_id']
+        original_message_id = feedback_info['original_message_id']
+        chat_id = feedback_info['chat_id']
+        
+        try:
+            # Сохраняем причину недовольства в базу данных
+            db_manager.save_feedback(request_id, selected_variant_index=None, feedback_reason=reason_text)
+            
+            # Логируем получение фидбека
+            logger.info(f"📝 Получен фидбек от {user_id}: '{reason_text[:50]}{'...' if len(reason_text) > 50 else ''}'")
+            
+            # Отправляем благодарность за фидбек
+            thanks_message = (
+                "🙏 **Спасибо за ваш отзыв!**\n\n"
+                "📝 Ваше мнение очень важно для нас и помогает улучшать качество ответов.\n\n"
+                "✨ **Можете продолжать использовать бота!** Просто отправьте мне любое сообщение или перешлите текст для переформулировки."
+            )
+            
+            self.send_message(chat_id, thanks_message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения фидбека: {e}")
+            # Всё равно благодарим пользователя
+            self.send_message(chat_id, "🙏 Спасибо за ваш отзыв! Можете продолжать использовать бота.")
+        finally:
+            # Очищаем флаг ожидания
+            del self.waiting_for_feedback[user_id]
+            logger.info(f"🧹 Очищен флаг ожидания фидбека для {user_id}")
+    
     def handle_successful_payment(self, message):
         """Обработка успешного платежа"""
         chat_id = message['chat']['id']
@@ -534,11 +580,31 @@ class SimpleTelegramBot:
                 
                 # Команда /start
                 if message.get('text') == '/start':
-                    self.send_message(chat_id, MESSAGES['welcome'], parse_mode='Markdown')
+                    # Очищаем флаг ожидания фидбека, если он был
+                    if user_id in self.waiting_for_feedback:
+                        del self.waiting_for_feedback[user_id]
+                        logger.info(f"🧹 Очищен флаг ожидания фидбека для {user_id} при /start")
+                    
+                    # Создаем клавиатуру с кнопкой политики конфиденциальности
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{
+                                "text": "📄 Политика конфиденциальности",
+                                "url": "https://lena-core.github.io/policy/"
+                            }]
+                        ]
+                    }
+                    
+                    self.send_message(chat_id, MESSAGES['welcome'], reply_markup=keyboard, parse_mode='Markdown')
                     return
                 
                 # Команда /donate
                 if message.get('text') == '/donate':
+                    # Очищаем флаг ожидания фидбека, если он был
+                    if user_id in self.waiting_for_feedback:
+                        del self.waiting_for_feedback[user_id]
+                        logger.info(f"🧹 Очищен флаг ожидания фидбека для {user_id} при /donate")
+                    
                     self.send_donation_options(chat_id)
                     return
                 
@@ -554,6 +620,16 @@ class SimpleTelegramBot:
                     # Игнорируем команды
                     if text.startswith('/'):
                         return
+                    
+                    # Проверяем, ожидаем ли мы от этого пользователя причину недовольства
+                    if user_id in self.waiting_for_feedback:
+                        self.handle_feedback_reason(user_id, text)
+                        return
+                    
+                    # Очищаем флаг ожидания фидбека - пользователь начинает новый запрос
+                    if user_id in self.waiting_for_feedback:
+                        del self.waiting_for_feedback[user_id]
+                        logger.info(f"🧹 Очищен флаг ожидания фидбека для {user_id} - новый запрос")
                     
                     # Определяем тип сообщения
                     message_type = 'direct_text'
